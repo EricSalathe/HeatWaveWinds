@@ -17,6 +17,7 @@ Dependencies:
 
 Intended for use in ensemble and heatwave analysis of WRF model outputs.
 """
+import xarray
 
 
 def avg_from_wind(ds, wind_dir, wind_label, WindMin=0, stat='mean', field='T2', hw_filt=False):
@@ -24,7 +25,7 @@ def avg_from_wind(ds, wind_dir, wind_label, WindMin=0, stat='mean', field='T2', 
     import xarray as xr
     import warnings
     warnings.filterwarnings("ignore", message="All-NaN slice encountered")
-    
+
     """
     Compute average or percentile surface temperature (T2) for specified wind direction ranges and minimum wind speed.
 
@@ -48,11 +49,10 @@ def avg_from_wind(ds, wind_dir, wind_label, WindMin=0, stat='mean', field='T2', 
         - Handles wind direction ranges that wrap around 360 degrees.
         - Filters out data below WindMin threshold if specified.
     """
-        
 
     # Check the selected field exists in the dataset
     if field not in ds:
-        if field=='WSPD': 
+        if field == 'WSPD':
             # If WSPD is not in the dataset, compute it from U and V
             ds['WSPD'] = np.hypot(ds['U'], ds['V'])
         else:
@@ -61,32 +61,34 @@ def avg_from_wind(ds, wind_dir, wind_label, WindMin=0, stat='mean', field='T2', 
     # Create an output dataset with coordinates
     ds_out = xr.Dataset(
         coords={
-           'XLAT': ds.coords['XLAT'],
-           'XLONG': ds.coords['XLONG'],
+            'XLAT': ds.coords['XLAT'],
+            'XLONG': ds.coords['XLONG'],
         }
     )
-    
+
     # apply heat wave filter if specified
-    if hw_filt: 
+    if hw_filt:
         T2_95 = ds['T2'].quantile(0.95, dim='datetime')
         ds = ds.where(ds['T2'] > T2_95, drop=True)
 
     # Compute mean or percentile for the specified field over all directions
+    wind_speed = np.hypot(ds['U'], ds['V'])
+
     if stat == 'mean':
         ds_out[field + '_all'] = ds[field].mean(dim='datetime')
     elif isinstance(stat, (int, float)) and stat >= 0 and stat <= 100:
-        ds_out[field + '_all'] = ds[field].quantile(stat/100, dim='datetime')
+        ds_out[field + '_all'] = ds[field].quantile(stat / 100, dim='datetime')
     else:
         raise ValueError("Please set 'stat' to 'mean' or a float percentile between 0 and 100.")
 
     # get wind direction
     ds = ds.assign(
-        wind_dir = (180 + np.degrees(np.arctan2(ds['U'], ds['V']))) % 360,
+        wind_dir=(180 + np.degrees(np.arctan2(ds['U'], ds['V']))) % 360,
     )
 
     # Filter on minimum wind threshold
     if WindMin > 0:
-        ds = ds.where(np.hypot(ds['U'], ds['V']) > WindMin)
+        ds = ds.where(wind_speed > WindMin)
 
     # loop over wind direction ranges
     for idr in range(wind_dir.shape[0]):
@@ -103,13 +105,59 @@ def avg_from_wind(ds, wind_dir, wind_label, WindMin=0, stat='mean', field='T2', 
         if stat == 'mean':
             ds_out[field + '_' + wind_label[idr]] = ds_filtered[field].mean(dim='datetime')
         elif isinstance(stat, (int, float)) and stat >= 0 and stat <= 100:
-            ds_out[field + '_' + wind_label[idr]] = ds_filtered[field].quantile(stat/100, dim='datetime')
+            ds_out[field + '_' + wind_label[idr]] = ds_filtered[field].quantile(stat / 100, dim='datetime')
         else:
             raise ValueError("Please set 'stat' to 'mean' or a float percentile between 0 and 100.")
 
     return ds_out
 
-def get_wrf850UVT(path, mask_range=[-999,0,0,0]):
+def count_wind_days(ds, wind_dir, wind_label, WindMin=0,hw_filt=False):
+    import numpy as np
+    import xarray as xr
+    import warnings
+    warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+
+    ds_out = xr.Dataset(
+        coords={
+            'XLAT': ds.coords['XLAT'],
+            'XLONG': ds.coords['XLONG'],
+        }
+    )
+
+    # heatwave filter
+    if hw_filt:
+        T2_95 = ds['T2'].quantile(0.95, dim='datetime')
+        ds = ds.where(ds['T2'] > T2_95, drop=True).fillna(0)
+
+    """
+    if WindMin > 0:
+        ds_out['wind_days_all'] = (wind_speed > WindMin).sum(dim='datetime')
+    else:
+        ds_out['wind_days_all'] = wind_speed.notnull().sum(dim='datetime')
+    """
+
+    wind_speed = np.hypot(ds['U'], ds['V'])
+
+    ds = ds.assign(
+        wind_dir=(180 + np.degrees(np.arctan2(ds['U'], ds['V']))) % 360,
+    )
+
+    if WindMin > 0:
+        ds = ds.where(wind_speed > WindMin)
+
+    for idr in range(wind_dir.shape[0]):
+        wd = ds['wind_dir']
+        if wind_dir[idr][0] > wind_dir[idr][1]:
+            mask = (wd > wind_dir[idr][0]) | (wd < wind_dir[idr][1])
+        else:
+            mask = (wd > wind_dir[idr][0]) & (wd < wind_dir[idr][1])
+        ds_filtered = ds.where(mask)
+
+        # Count days with wind from this direction
+        ds_out['wind_days_' + wind_label[idr]] = ds_filtered['U'].notnull().sum(dim='datetime')
+    return ds_out
+
+def get_wrf850UVT(path, mask_range=[-999, 0, 0, 0]):
     """
     Load WRF output data from a NetCDF file and optionally apply a spatial mask.
 
@@ -126,10 +174,9 @@ def get_wrf850UVT(path, mask_range=[-999,0,0,0]):
     if mask_range[0] != -999:
         lon1, lon2, lat1, lat2 = mask_range
         mask = (
-            (da.XLAT >= lat1) & (da.XLAT <= lat2) &
-            (da.XLONG >= lon1) & (da.XLONG <= lon2)
+                (da.XLAT >= lat1) & (da.XLAT <= lat2) &
+                (da.XLONG >= lon1) & (da.XLONG <= lon2)
         )
         da = da.where(mask, drop=True)
 
     return da
-
